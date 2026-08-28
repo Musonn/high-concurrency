@@ -7,11 +7,10 @@
 环境要求：Go 1.26 或更高版本。
 
 ```bash
-go test ./...
 go run .
 ```
 
-当前代码实现了 **Step 0**：从 JSONPlaceholder 获取并解析一篇 post。测试使用内存中的模拟 HTTP transport，不会向公共 API 发送测试流量。
+当前代码实现了 **Step 0**：从 JSONPlaceholder 获取并解析一篇 post。
 
 最适合第一阶段的是 **JSONPlaceholder + httpbin**：
 
