@@ -28,5 +28,11 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("%+v\n", post)
+	fmt.Printf(
+	"ID: %d\nUser ID: %d\nTitle: %s\nBody: %s\n",
+	post.ID,
+	post.UserID,
+	post.Title,
+	post.Body,
+)
 }
