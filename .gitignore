@@ -1,0 +1,9 @@
+# Go build and test artifacts
+high-concurrency
+*.test
+*.out
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
