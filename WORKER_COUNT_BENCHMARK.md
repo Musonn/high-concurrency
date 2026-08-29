@@ -1,13 +1,20 @@
-# Worker count experiment
+# Worker Count Benchmark
 
 Date: 2026-08-29 (UTC)
 
+- Experiment code commit: [`f55e1eb11fa7028b7da93f5fef0781069766066b`](https://github.com/Musonn/high-concurrency/commit/f55e1eb11fa7028b7da93f5fef0781069766066b)
 - Endpoint: `https://jsonplaceholder.typicode.com/posts/{id}`
 - Requests per run: 100
 - Runs per worker count: 10
 - Client timeout: 2 seconds
 - Failed requests: 0 / 5,000
 - Duration: the program's internal `Total time`
+
+The experiment code accepts the worker count through `-workers`, for example:
+
+```bash
+go run . -workers 20
+```
 
 ## Summary
 
@@ -19,8 +26,9 @@ Date: 2026-08-29 (UTC)
 | 20 | 94.246 ms | 122.432 ms | 107.527 ms |
 | 50 | 107.100 ms | 157.410 ms | 135.086 ms |
 
-Throughput
+## Throughput
 
+```text
 1000 ┤                 ● 20
  900 ┤
  800 ┤          ● 10           ● 50
@@ -34,6 +42,7 @@ Throughput
      └──────────────────────────────
        1    5    10    20    50
                 Workers
+```
 
 ## Raw durations
 
@@ -46,7 +55,6 @@ All values are milliseconds.
 | 10 | 125.379 | 129.922 | 135.394 | 113.256 | 128.743 | 123.937 | 133.671 | 110.219 | 212.856 | 119.634 |
 | 20 | 94.246 | 112.787 | 122.432 | 106.588 | 118.868 | 97.995 | 96.246 | 101.410 | 112.918 | 111.777 |
 | 50 | 143.328 | 146.610 | 123.805 | 146.642 | 107.100 | 128.060 | 123.397 | 121.987 | 157.410 | 152.516 |
-
 
 ## Takeaway
 
