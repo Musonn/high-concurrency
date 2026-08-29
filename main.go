@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"sync"
@@ -43,6 +44,9 @@ func worker(client *http.Client, jobs <-chan int) {
 }
 
 func main() {
+	workerCount := flag.Int("workers", 10, "number of concurrent workers")
+	flag.Parse()
+
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 
@@ -50,7 +54,7 @@ func main() {
 		Timeout: 2 * time.Second,
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < *workerCount; i++ {
 		wg.Add(1)
 
 		go func() {
