@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -22,6 +23,8 @@ type Result struct {
 	Duration time.Duration
 	Err      error
 }
+
+const requestCount = 100
 
 func fetch(client *http.Client, id int) Result {
 	start := time.Now()
@@ -53,6 +56,38 @@ func worker(client *http.Client, jobs <-chan int, results chan<- Result) {
 	}
 }
 
+func getStats(durations []time.Duration) (min, max, avg, p50, p95, p99 time.Duration) {
+	if len(durations) == 0 {
+		return
+	}
+
+	var total time.Duration
+
+	for _, d := range durations {
+		total += d
+	}
+
+	avg = total / time.Duration(len(durations))
+	sort.Slice(durations, func(i, j int) bool {
+		return durations[i] < durations[j]
+	})
+	min = durations[0]
+	max = durations[len(durations)-1]
+	p50 = percentile(durations, 50)
+	p95 = percentile(durations, 95)
+	p99 = percentile(durations, 99)
+
+	return min, max, avg, p50, p95, p99
+}
+
+func percentile(sortedDurations []time.Duration, percentile int) time.Duration {
+	index := (len(sortedDurations)*percentile + 99) / 100
+	if index > 0 {
+		index--
+	}
+	return sortedDurations[index]
+}
+
 func main() {
 	workerCount := flag.Int("workers", 10, "number of concurrent workers")
 	flag.Parse()
@@ -63,7 +98,6 @@ func main() {
 	jobs := make(chan int)
 	results := make(chan Result)
 	var wg sync.WaitGroup
-	start := time.Now()
 
 	client := &http.Client{
 		Timeout: 2 * time.Second,
@@ -78,8 +112,10 @@ func main() {
 		}()
 	}
 
+	start := time.Now()
+
 	go func() {
-		for id := 1; id <= 100; id++ {
+		for id := 1; id <= requestCount; id++ {
 			jobs <- id
 		}
 		close(jobs)
@@ -90,6 +126,7 @@ func main() {
 		close(results)
 	}()
 
+	// Collect results and calculate statistics.
 	successful, failed := 0, 0
 	var durations []time.Duration
 
@@ -101,12 +138,14 @@ func main() {
 			successful++
 		}
 	}
+	totalTime := time.Since(start)
 
 	fmt.Printf("Successful: %d, Failed: %d\n", successful, failed)
-	fmt.Printf("Durations: ")
-	for _, duration := range durations {
-		fmt.Printf("%s ", duration)
-	}
-	fmt.Println()
-	fmt.Printf("Total time: %s\n", time.Since(start))
+
+	throughput := float64(successful) / totalTime.Seconds()
+	fmt.Printf("Total time taken: %v\n", totalTime)
+	fmt.Printf("Throughput: %.2f requests/sec\n", throughput)
+
+	min, max, avg, p50, p95, p99 := getStats(durations)
+	fmt.Printf("Min: %v, Max: %v, Avg: %v, P50: %v, P95: %v, P99: %v\n", min, max, avg, p50, p95, p99)
 }
