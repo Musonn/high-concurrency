@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"sync"
@@ -46,10 +46,13 @@ func fetch(client *http.Client, id int) Result {
 		return Result{ID: id, ServiceTime: time.Since(start), Err: fmt.Errorf("status code %d", resp.StatusCode)}
 	}
 
-	var post Post
-	if err := json.NewDecoder(resp.Body).Decode(&post); err != nil {
-		fmt.Printf("failed to decode post %d: %v\n", id, err)
-		return Result{ID: id, ServiceTime: time.Since(start), Err: err}
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return Result{
+			ID:          id,
+			ServiceTime: time.Since(start),
+			Err:         err,
+		}
 	}
 
 	return Result{ID: id, ServiceTime: time.Since(start)}
