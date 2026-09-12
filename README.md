@@ -2,7 +2,7 @@
 
 This lesson moves the experiment from a public API to a deterministic localhost server. The server spends a fixed `20ms` on every request, so the worker pool's approximate processing capacity is known before the test begins.
 
-You will write the load generator and use it to observe this progression:
+The load generator demonstrates this progression:
 
 ```text
 offered load
@@ -52,7 +52,7 @@ Keep the default `20ms` service time for this lesson.
 
 ## Theoretical Capacity
 
-Use `10` workers throughout the first experiment. If each worker completes one request every `20ms`, one worker can process approximately:
+Use `10` workers throughout Experiment B. If each worker completes one request every `20ms`, one worker can process approximately:
 
 ```text
 1 second / 20ms = 50 requests/second
@@ -66,196 +66,127 @@ The entire pool can therefore process approximately:
 
 This is an ideal estimate. HTTP and scheduler overhead mean the measured capacity may be slightly below `500 req/s`.
 
-## Your Task
+## Experiment B: Load Shedding
 
-Adapt the root `main.go` into a rate-controlled load-shedding experiment. Keep the existing queue-time and service-time measurements where useful, but replace the public API request with:
+Relative to Experiment A, the admission policy changes from a blocking channel send to a non-blocking send. Keep the worker count, queue size, service time, request count, and ticker-based producer fixed.
 
-```text
-GET http://127.0.0.1:8080/work
+```ini
+workers     = 10
+queueSize   = 100
+serviceTime = 20ms
+requests    = 2000
 ```
 
-Aim for this command-line interface:
+The client sends HTTP requests to `http://127.0.0.1:8080/work` with a `2s` timeout. The endpoint and request count are fixed in `main.go`; there are no `-url`, `-duration`, or `-requests` flags.
+
+## Client Configuration
 
 ```bash
-go run . \
-  -workers=10 \
-  -queuesize=100 \
-  -rate=800 \
-  -duration=10s
+go run . -workers=10 -queuesize=100 -rate=400
 ```
-
-Suggested defaults:
 
 | Flag | Default | Meaning |
 |---|---:|---|
 | `-workers` | `10` | Number of request workers |
 | `-queuesize` | `100` | Maximum number of waiting jobs |
-| `-rate` | `400` | Offered requests per second |
-| `-duration` | `10s` | Period during which new jobs are generated |
-| `-url` | `http://127.0.0.1:8080/work` | Mock endpoint |
+| `-rate` | `400` | Target admission attempts per second |
 
-Validate that workers, queue size, rate, and duration are positive.
+The current client does not validate flag values. For this experiment, use the fixed configuration and rates below. Invalid values such as a zero rate or negative queue size can panic; a nonpositive worker count provides no processing capacity.
 
-## Implementation Milestones
+Changing the mock server's address also requires changing the client's hardcoded endpoint.
 
-### 1. Replace the fixed request loop with a rate-controlled producer
+## Producer and Admission Policy
 
-The previous experiment created exactly 100 jobs as quickly as possible. This experiment must attempt work at a configured rate for a configured duration.
+The producer creates one job per received ticker event, using an interval of `time.Second / rate`, until it has attempted exactly 2,000 jobs. Ticker scheduling can affect the actual arrival rate; the configured rate is a target.
 
-For the initial version, a `time.Ticker` interval can be calculated from the rate:
-
-```text
-interval = 1 second / target rate
-```
-
-On every tick, create one job and increment an `offered` counter. Stop generating jobs when the experiment duration expires.
-
-The producer should do very little work so that it can keep up with the requested rate. Record the actual elapsed generation time and calculate the measured offered rate afterward.
-
-### 2. Make admission non-blocking
-
-A normal channel send blocks when the queue is full. That demonstrates backpressure, but it prevents the producer from maintaining the configured offered load.
-
-For this experiment, attempt a non-blocking send:
+Admission is non-blocking:
 
 ```go
 select {
 case jobs <- job:
-	// accepted
+    accepted++
 default:
-	// rejected because the queue is full
+    rejected++
 }
 ```
 
-Increment `accepted` only when the send succeeds. Increment `rejected` in the `default` branch. A rejected job must never reach a worker.
+A successful send accepts the job. If the queue cannot accept it immediately, the producer rejects it and continues. Rejected jobs never reach a worker or make an HTTP request.
 
-This admission decision is the load-shedding mechanism.
+Experiment A's blocking `jobs <- job` slows the producer when the queue fills. Experiment B rejects excess work while continuing to attempt admission on ticker events.
 
-### 3. Preserve request timing boundaries
+## Timing and Shutdown
 
-Each accepted job should retain its creation time. A worker should measure:
+Each accepted job retains its creation time:
 
-```text
-job created
-    │
-    │ QueueTime
-    ▼
-worker receives job
-    │
-    │ ServiceTime
-    ▼
-HTTP request completes
-```
+- Queue time runs from job creation until a worker receives it.
+- Total time runs from job creation until the HTTP attempt finishes, including queue time.
 
-Rejected jobs have no ServiceTime because they never enter the worker pool. If you want to measure rejection latency, record it separately rather than mixing it into request latency.
+After all 2,000 admission attempts, the producer closes `jobs`. Workers drain accepted jobs, then `results` closes after all workers exit. The collector finishes before printing the report.
 
-### 4. Implement a clean shutdown sequence
+Admission counters belong to the producer and are returned through a channel. The collector owns the successful-request count and latency samples, avoiding unsynchronized shared counter access.
 
-Use this ownership order:
+## Output Metrics
 
-1. The producer generates jobs for the configured duration.
-2. The producer stops and closes `jobs`.
-3. Workers finish accepted jobs that remain in the queue.
-4. After all workers exit, close `results`.
-5. The result collector finishes and prints the report.
+The client prints only these seven metrics:
 
-Only the goroutine that owns a channel's send lifecycle should close that channel. Do not close `jobs` merely because the queue is full.
+| Metric | Definition |
+|---|---|
+| Offered rate | Configured `-rate` target in requests/sec; not a measured arrival rate |
+| Accepted | Jobs successfully sent to the worker queue |
+| Rejected | Jobs rejected immediately at admission |
+| Reject % | `rejected / 2000 × 100` |
+| Completed throughput | Successful HTTP requests divided by total elapsed seconds, including queue drain |
+| Queue P95 | 95th percentile of queue time for accepted jobs |
+| Total P95 | 95th percentile of total time for accepted jobs |
 
-### 5. Avoid measurement races
+A successful HTTP request returns `200 OK` and its response body is read without error. Failed accepted requests remain in the latency samples but do not contribute to completed throughput. Rejected requests are excluded from both latency metrics.
 
-Counters updated from multiple goroutines must be synchronized. Choose one of these approaches:
+Percentiles use the nearest-rank method; empty samples return zero. Durations are printed with Go duration units, such as `µs` or `ms`.
 
-- Keep producer-owned counters in the producer and return them when it finishes.
-- Send events to a single collector goroutine.
-- Use `sync/atomic` for simple counters.
+Completed throughput uses the same full-run measurement window as Experiment A: from just before producer launch until all accepted results are collected. It is not throughput restricted to the generation window. Generation duration and drain duration are not reported separately.
 
-Do not read a counter while another goroutine may still be writing it unless synchronization establishes that the writer has finished.
-
-## Required Metrics
-
-Report at least:
-
-- configured rate;
-- measured offered rate;
-- offered jobs;
-- accepted jobs;
-- rejected jobs;
-- completed requests;
-- failed HTTP requests;
-- rejection percentage;
-- completion throughput during the generation window;
-- QueueTime average and P95;
-- ServiceTime average and P95;
-- TotalTime average and P95;
-- queue length when generation stops.
-
-Check these invariants after every run:
-
-```text
-offered = accepted + rejected
-accepted = completed + failed
-```
-
-The second invariant should be checked after the accepted queue has drained. If HTTP failures are included in `completed`, define the counters differently and state that definition in the output.
-
-## Measurement Window and Queue Drain
-
-Stopping the producer does not mean the experiment is fully finished. Accepted jobs may still be waiting in the queue.
-
-Record a snapshot when the generation window ends:
-
-- completed during the window;
-- rejected during the window;
-- queue length at the end of the window.
-
-Then drain the queue before exiting. Report drain time separately. Do not use generation time plus drain time as the denominator for the offered rate.
-
-This distinction prevents a large queue from appearing to create worker capacity merely because it accepts extra jobs that are completed later.
+Admission accounting guarantees `accepted + rejected = 2000`. After drain, every accepted job has a result, either successful or failed. The client does not print separate success/failure counts or perform explicit accounting assertions.
 
 ## Experiment Matrix
 
-Keep the following values fixed:
-
-```ini
-workers = 10
-queuesize = 100
-duration = 10s
-service_time = 20ms
-```
-
-Change only the offered rate:
+Start the mock server in one terminal:
 
 ```bash
-go run . -workers=10 -queuesize=100 -rate=400  -duration=10s
-go run . -workers=10 -queuesize=100 -rate=500  -duration=10s
-go run . -workers=10 -queuesize=100 -rate=800  -duration=10s
-go run . -workers=10 -queuesize=100 -rate=1000 -duration=10s
+go run ./cmd/mockserver -service-time=20ms
 ```
 
-Run each rate at least five times. Localhost removes public-network variability, but the Go scheduler and HTTP stack still introduce small variations.
+In another terminal, run these commands sequentially when ready to collect results:
+
+```bash
+go run . -workers=10 -queuesize=100 -rate=300
+go run . -workers=10 -queuesize=100 -rate=400
+go run . -workers=10 -queuesize=100 -rate=500
+go run . -workers=10 -queuesize=100 -rate=600
+go run . -workers=10 -queuesize=100 -rate=800
+```
+
+Each invocation attempts 2,000 jobs and then drains accepted work. Record the seven output metrics in this table:
+
+| Offered rate (req/s) | Accepted | Rejected | Reject % | Completed throughput (req/s) | Queue P95 | Total P95 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 300 | | | | | | |
+| 400 | | | | | | |
+| 500 | | | | | | |
+| 600 | | | | | | |
+| 800 | | | | | | |
 
 ## Expected Behavior
 
-Treat these as hypotheses to test, not results to copy into the experiment record.
+These are hypotheses to test, not recorded results.
 
-| Offered rate | Expected regime | Expected observation |
-|---:|---|---|
-| `400 req/s` | Below capacity | Little queueing and almost no rejection |
-| `500 req/s` | Near capacity | Sensitive to overhead; queueing may begin |
-| `800 req/s` | Overload | Queue fills; sustained rejection follows |
-| `1000 req/s` | Heavy overload | Completion throughput remains near capacity while rejection increases |
+| Offered rate (req/s) | Expected behavior |
+|---:|---|
+| 300 | Little queueing and little or no rejection |
+| 400 | Little queueing and little or no rejection |
+| 500 | Near ideal capacity; overhead may cause queue buildup |
+| 600 | Overload; the queue may fill and trigger rejection |
+| 800 | Heavier overload; more rejection while throughput stays near worker capacity |
 
-At `800` or `1000 req/s`, the queue can temporarily accept more work than workers complete. That is burst absorption, not additional processing capacity. Once the bounded queue is full, rejecting excess jobs prevents waiting time and memory use from growing without limit.
+The 100-job queue can temporarily absorb excess arrivals. With only 2,000 attempts, a run near capacity may finish admission without rejection despite accumulating queue time. Zero rejection does not prove that the offered rate is sustainable indefinitely.
 
-## Results Template
-
-Create a separate Markdown file after running the experiment. Record all five runs and summarize them with a table like this:
-
-| Rate | Offered req/s | Completed req/s | Rejected | Rejection % | QueueTime avg | QueueTime P95 | Queue length at stop | Drain time |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 400 | | | | | | | | |
-| 500 | | | | | | | | |
-| 800 | | | | | | | | |
-| 1000 | | | | | | | | |
-
-Do not write the conclusion before inspecting the data. In particular, compare completion throughput with offered load, and separate work completed during the generation window from work completed while draining the queue.
+Load shedding does not increase processing capacity or remove waiting time for accepted jobs. It rejects excess work once the bounded queue fills. Compare the completed throughput, rejection percentage, and latency percentiles together.

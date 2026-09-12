@@ -11,86 +11,56 @@ import (
 )
 
 type Result struct {
-	ID          int
-	QueueTime   time.Duration
-	ServiceTime time.Duration
-	TotalTime   time.Duration
-	Err         error
+	QueueTime time.Duration
+	TotalTime time.Duration
+	Err       error
 }
 
 type Job struct {
-	ID        int
 	CreatedAt time.Time
+}
+
+type AdmissionStats struct {
+	Accepted int
+	Rejected int
 }
 
 const requestCount = 2000
 
-func fetch(client *http.Client, id int) Result {
-	start := time.Now()
-
+func fetch(client *http.Client) Result {
 	resp, err := client.Get("http://127.0.0.1:8080/work")
 	if err != nil {
-		fmt.Printf("failed to fetch post %d: %v\n", id, err)
-		return Result{ID: id, ServiceTime: time.Since(start), Err: err}
+		return Result{Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("post %d returned status %d\n", id, resp.StatusCode)
-		return Result{ID: id, ServiceTime: time.Since(start), Err: fmt.Errorf("status code %d", resp.StatusCode)}
+		return Result{Err: fmt.Errorf("status code %d", resp.StatusCode)}
 	}
 
 	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return Result{
-			ID:          id,
-			ServiceTime: time.Since(start),
-			Err:         err,
-		}
-	}
-
-	return Result{ID: id, ServiceTime: time.Since(start)}
+	return Result{Err: err}
 }
 
 func worker(client *http.Client, jobs <-chan Job, results chan<- Result) {
 	for job := range jobs {
 		queueTime := time.Since(job.CreatedAt)
-		result := fetch(client, job.ID)
+		result := fetch(client)
 		result.QueueTime = queueTime
 		result.TotalTime = time.Since(job.CreatedAt)
 		results <- result
 	}
 }
 
-func getStats(durations []time.Duration) (min, max, avg, p50, p95, p99 time.Duration) {
+func p95(durations []time.Duration) time.Duration {
 	if len(durations) == 0 {
-		return
+		return 0
 	}
 
-	var total time.Duration
-
-	for _, d := range durations {
-		total += d
-	}
-
-	avg = total / time.Duration(len(durations))
 	sort.Slice(durations, func(i, j int) bool {
 		return durations[i] < durations[j]
 	})
-	min = durations[0]
-	max = durations[len(durations)-1]
-	p50 = percentile(durations, 50)
-	p95 = percentile(durations, 95)
-	p99 = percentile(durations, 99)
-
-	return min, max, avg, p50, p95, p99
-}
-
-func percentile(sortedDurations []time.Duration, percentile int) time.Duration {
-	index := (len(sortedDurations)*percentile + 99) / 100
-	if index > 0 {
-		index--
-	}
-	return sortedDurations[index]
+	index := (len(durations)*95+99)/100 - 1
+	return durations[index]
 }
 
 func main() {
@@ -105,6 +75,7 @@ func main() {
 
 	jobs := make(chan Job, *queueSize)
 	results := make(chan Result)
+	admissionStats := make(chan AdmissionStats, 1)
 	var wg sync.WaitGroup
 
 	client := &http.Client{
@@ -123,11 +94,29 @@ func main() {
 	start := time.Now()
 
 	go func() {
-		for id := 1; id <= requestCount; id++ {
+		accepted := 0
+		rejected := 0
+
+		for i := 0; i < requestCount; i++ {
 			<-ticker.C
-			jobs <- Job{ID: id, CreatedAt: time.Now()}
+			job := Job{
+				CreatedAt: time.Now(),
+			}
+
+			select {
+			case jobs <- job:
+				accepted++
+			default:
+				rejected++
+			}
 		}
+
 		close(jobs)
+
+		admissionStats <- AdmissionStats{
+			Accepted: accepted,
+			Rejected: rejected,
+		}
 	}()
 
 	go func() {
@@ -136,33 +125,29 @@ func main() {
 	}()
 
 	// Collect results and calculate statistics.
-	successful, failed := 0, 0
+	successful := 0
 	var queueTimes []time.Duration
-	var serviceTimes []time.Duration
 	var totalTimes []time.Duration
 
 	for result := range results {
 		queueTimes = append(queueTimes, result.QueueTime)
-		serviceTimes = append(serviceTimes, result.ServiceTime)
 		totalTimes = append(totalTimes, result.TotalTime)
 
-		if result.Err != nil {
-			failed++
-		} else {
+		if result.Err == nil {
 			successful++
 		}
 	}
 	totalTime := time.Since(start)
 
+	stats := <-admissionStats
+	fmt.Printf("Offered rate: %d requests/sec\n", *rate)
+	fmt.Printf("Accepted: %d\n", stats.Accepted)
+	fmt.Printf("Rejected: %d\n", stats.Rejected)
+	fmt.Printf("Reject %%: %.2f%%\n", 100*float64(stats.Rejected)/float64(requestCount))
+
 	throughput := float64(successful) / totalTime.Seconds()
-	fmt.Printf("actual throughput: %.2f requests/sec\n", throughput)
+	fmt.Printf("Completed throughput: %.2f requests/sec\n", throughput)
 
-	_, _, avg, _, p95, _ := getStats(queueTimes)
-	fmt.Printf("QueueTime Avg/P95: %v / %v\n", avg, p95)
-
-	_, _, avg, _, p95, _ = getStats(totalTimes)
-	fmt.Printf("TotalTime Avg/P95: %v / %v\n", avg, p95)
-
-	_, _, avg, _, p95, _ = getStats(serviceTimes)
-	fmt.Printf("ServiceTime Avg/P95: %v / %v\n", avg, p95)
+	fmt.Printf("Queue P95: %v\n", p95(queueTimes))
+	fmt.Printf("Total P95: %v\n", p95(totalTimes))
 }
