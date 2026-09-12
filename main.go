@@ -10,13 +10,6 @@ import (
 	"time"
 )
 
-type Post struct {
-	UserID int    `json:"userId"`
-	ID     int    `json:"id"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-}
-
 type Result struct {
 	ID          int
 	QueueTime   time.Duration
@@ -30,12 +23,12 @@ type Job struct {
 	CreatedAt time.Time
 }
 
-const requestCount = 100
+const requestCount = 2000
 
 func fetch(client *http.Client, id int) Result {
 	start := time.Now()
 
-	resp, err := client.Get(fmt.Sprintf("https://jsonplaceholder.typicode.com/posts/%d", id))
+	resp, err := client.Get("http://127.0.0.1:8080/work")
 	if err != nil {
 		fmt.Printf("failed to fetch post %d: %v\n", id, err)
 		return Result{ID: id, ServiceTime: time.Since(start), Err: err}
@@ -102,8 +95,13 @@ func percentile(sortedDurations []time.Duration, percentile int) time.Duration {
 
 func main() {
 	workerCount := flag.Int("workers", 10, "number of concurrent workers")
-	queueSize := flag.Int("queuesize", 10, "jobs channel buffer size")
+	queueSize := flag.Int("queuesize", 100, "jobs channel buffer size")
+	rate := flag.Int("rate", 400, "incoming requests per second")
 	flag.Parse()
+
+	interval := time.Second / time.Duration(*rate)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	jobs := make(chan Job, *queueSize)
 	results := make(chan Result)
@@ -126,6 +124,7 @@ func main() {
 
 	go func() {
 		for id := 1; id <= requestCount; id++ {
+			<-ticker.C
 			jobs <- Job{ID: id, CreatedAt: time.Now()}
 		}
 		close(jobs)
@@ -155,18 +154,15 @@ func main() {
 	}
 	totalTime := time.Since(start)
 
-	fmt.Printf("Successful: %d, Failed: %d\n", successful, failed)
-
 	throughput := float64(successful) / totalTime.Seconds()
-	fmt.Printf("Total time taken: %v\n", totalTime)
-	fmt.Printf("Throughput: %.2f requests/sec\n", throughput)
+	fmt.Printf("actual throughput: %.2f requests/sec\n", throughput)
 
-	min, max, avg, p50, p95, p99 := getStats(queueTimes)
-	fmt.Printf("Queue Time - Min: %v, Max: %v, Avg: %v, P50: %v, P95: %v, P99: %v\n", min, max, avg, p50, p95, p99)
+	_, _, avg, _, p95, _ := getStats(queueTimes)
+	fmt.Printf("QueueTime Avg/P95: %v / %v\n", avg, p95)
 
-	min, max, avg, p50, p95, p99 = getStats(serviceTimes)
-	fmt.Printf("Service Time - Min: %v, Max: %v, Avg: %v, P50: %v, P95: %v, P99: %v\n", min, max, avg, p50, p95, p99)
+	_, _, avg, _, p95, _ = getStats(totalTimes)
+	fmt.Printf("TotalTime Avg/P95: %v / %v\n", avg, p95)
 
-	min, max, avg, p50, p95, p99 = getStats(totalTimes)
-	fmt.Printf("Total Time - Min: %v, Max: %v, Avg: %v, P50: %v, P95: %v, P99: %v\n", min, max, avg, p50, p95, p99)
+	_, _, avg, _, p95, _ = getStats(serviceTimes)
+	fmt.Printf("ServiceTime Avg/P95: %v / %v\n", avg, p95)
 }
