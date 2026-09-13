@@ -13,7 +13,6 @@ import (
 type Result struct {
 	QueueTime time.Duration
 	TotalTime time.Duration
-	Err       error
 }
 
 type Job struct {
@@ -23,31 +22,32 @@ type Job struct {
 type AdmissionStats struct {
 	Accepted int
 	Rejected int
+	Duration time.Duration
 }
 
 const requestCount = 2000
 
-func fetch(client *http.Client) Result {
+func fetch(client *http.Client) {
 	resp, err := client.Get("http://127.0.0.1:8080/work")
 	if err != nil {
-		return Result{Err: err}
+		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Result{Err: fmt.Errorf("status code %d", resp.StatusCode)}
+		return
 	}
 
-	_, err = io.Copy(io.Discard, resp.Body)
-	return Result{Err: err}
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 func worker(client *http.Client, jobs <-chan Job, results chan<- Result) {
 	for job := range jobs {
 		queueTime := time.Since(job.CreatedAt)
-		result := fetch(client)
-		result.QueueTime = queueTime
-		result.TotalTime = time.Since(job.CreatedAt)
-		results <- result
+		fetch(client)
+		results <- Result{
+			QueueTime: queueTime,
+			TotalTime: time.Since(job.CreatedAt),
+		}
 	}
 }
 
@@ -91,11 +91,10 @@ func main() {
 		}()
 	}
 
-	start := time.Now()
-
 	go func() {
 		accepted := 0
 		rejected := 0
+		producerStart := time.Now()
 
 		for i := 0; i < requestCount; i++ {
 			<-ticker.C
@@ -111,11 +110,14 @@ func main() {
 			}
 		}
 
+		producerDuration := time.Since(producerStart)
+
 		close(jobs)
 
 		admissionStats <- AdmissionStats{
 			Accepted: accepted,
 			Rejected: rejected,
+			Duration: producerDuration,
 		}
 	}()
 
@@ -124,30 +126,22 @@ func main() {
 		close(results)
 	}()
 
-	// Collect results and calculate statistics.
-	successful := 0
+	// Collect latency samples for accepted jobs.
 	var queueTimes []time.Duration
 	var totalTimes []time.Duration
 
 	for result := range results {
 		queueTimes = append(queueTimes, result.QueueTime)
 		totalTimes = append(totalTimes, result.TotalTime)
-
-		if result.Err == nil {
-			successful++
-		}
 	}
-	totalTime := time.Since(start)
 
 	stats := <-admissionStats
 	fmt.Printf("Offered rate: %d requests/sec\n", *rate)
+	fmt.Printf("Actual offered rate: %.2f requests/sec\n", float64(requestCount)/stats.Duration.Seconds())
 	fmt.Printf("Accepted: %d\n", stats.Accepted)
 	fmt.Printf("Rejected: %d\n", stats.Rejected)
 	fmt.Printf("Reject %%: %.2f%%\n", 100*float64(stats.Rejected)/float64(requestCount))
-
-	throughput := float64(successful) / totalTime.Seconds()
-	fmt.Printf("Completed throughput: %.2f requests/sec\n", throughput)
-
+	fmt.Printf("Accepted rate: %.2f requests/sec\n", float64(stats.Accepted)/stats.Duration.Seconds())
 	fmt.Printf("Queue P95: %v\n", p95(queueTimes))
 	fmt.Printf("Total P95: %v\n", p95(totalTimes))
 }

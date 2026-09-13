@@ -123,29 +123,28 @@ Each accepted job retains its creation time:
 
 After all 2,000 admission attempts, the producer closes `jobs`. Workers drain accepted jobs, then `results` closes after all workers exit. The collector finishes before printing the report.
 
-Admission counters belong to the producer and are returned through a channel. The collector owns the successful-request count and latency samples, avoiding unsynchronized shared counter access.
+Admission counters belong to the producer and are returned through a channel. The collector owns the latency samples, avoiding unsynchronized shared counter access.
 
 ## Output Metrics
 
-The client prints only these seven metrics:
+The client prints only these eight metrics:
 
 | Metric | Definition |
 |---|---|
 | Offered rate | Configured `-rate` target in requests/sec; not a measured arrival rate |
+| Actual offered rate | All 2,000 admission attempts divided by the producer's elapsed time |
 | Accepted | Jobs successfully sent to the worker queue |
 | Rejected | Jobs rejected immediately at admission |
 | Reject % | `rejected / 2000 × 100` |
-| Completed throughput | Successful HTTP requests divided by total elapsed seconds, including queue drain |
+| Accepted rate | Accepted jobs divided by the producer's elapsed time |
 | Queue P95 | 95th percentile of queue time for accepted jobs |
 | Total P95 | 95th percentile of total time for accepted jobs |
 
-A successful HTTP request returns `200 OK` and its response body is read without error. Failed accepted requests remain in the latency samples but do not contribute to completed throughput. Rejected requests are excluded from both latency metrics.
+Actual offered rate and accepted rate use the generation window, from before the first ticker wait through the final admission attempt. Rejected requests are excluded from both latency metrics. Every accepted job contributes one latency sample, including if its HTTP attempt fails.
 
 Percentiles use the nearest-rank method; empty samples return zero. Durations are printed with Go duration units, such as `µs` or `ms`.
 
-Completed throughput uses the same full-run measurement window as Experiment A: from just before producer launch until all accepted results are collected. It is not throughput restricted to the generation window. Generation duration and drain duration are not reported separately.
-
-Admission accounting guarantees `accepted + rejected = 2000`. After drain, every accepted job has a result, either successful or failed. The client does not print separate success/failure counts or perform explicit accounting assertions.
+Admission accounting guarantees `accepted + rejected = 2000`. After drain, every accepted job has one latency sample. The client does not print separate success/failure counts or perform explicit accounting assertions.
 
 ## Experiment Matrix
 
@@ -165,15 +164,15 @@ go run . -workers=10 -queuesize=100 -rate=600
 go run . -workers=10 -queuesize=100 -rate=800
 ```
 
-Each invocation attempts 2,000 jobs and then drains accepted work. Record the seven output metrics in this table:
+Each invocation attempts 2,000 jobs and then drains accepted work. Record the eight output metrics in this table:
 
-| Offered rate (req/s) | Accepted | Rejected | Reject % | Completed throughput (req/s) | Queue P95 | Total P95 |
-|---:|---:|---:|---:|---:|---:|---:|
-| 300 | | | | | | |
-| 400 | | | | | | |
-| 500 | | | | | | |
-| 600 | | | | | | |
-| 800 | | | | | | |
+| Offered rate (req/s) | Actual offered (req/s) | Accepted | Rejected | Reject % | Accepted rate (req/s) | Queue P95 | Total P95 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 300 | | | | | | | |
+| 400 | | | | | | | |
+| 500 | | | | | | | |
+| 600 | | | | | | | |
+| 800 | | | | | | | |
 
 ## Expected Behavior
 
