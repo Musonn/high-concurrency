@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -26,6 +28,19 @@ type AdmissionStats struct {
 }
 
 const requestCount = 2000
+
+func validateConfig(workerCount, queueSize, rate int) error {
+	switch {
+	case workerCount <= 0:
+		return errors.New("workers must be greater than zero")
+	case queueSize < 0:
+		return errors.New("queuesize must not be negative")
+	case rate <= 0:
+		return errors.New("rate must be greater than zero")
+	default:
+		return nil
+	}
+}
 
 func fetch(client *http.Client) {
 	resp, err := client.Get("http://127.0.0.1:8080/work")
@@ -68,6 +83,10 @@ func main() {
 	queueSize := flag.Int("queuesize", 100, "jobs channel buffer size")
 	rate := flag.Int("rate", 400, "incoming requests per second")
 	flag.Parse()
+	if err := validateConfig(*workerCount, *queueSize, *rate); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
+		os.Exit(2)
+	}
 
 	interval := time.Second / time.Duration(*rate)
 	ticker := time.NewTicker(interval)

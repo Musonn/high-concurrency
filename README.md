@@ -91,7 +91,7 @@ go run . -workers=10 -queuesize=100 -rate=400
 | `-queuesize` | `100` | Maximum number of waiting jobs |
 | `-rate` | `400` | Target admission attempts per second |
 
-The current client does not validate flag values. For this experiment, use the fixed configuration and rates below. Invalid values such as a zero rate or negative queue size can panic; a nonpositive worker count provides no processing capacity.
+The client validates its configuration before starting: `-workers` and `-rate` must be greater than zero, and `-queuesize` cannot be negative. The mock server also rejects a negative `-service-time`.
 
 Changing the mock server's address also requires changing the client's hardcoded endpoint.
 
