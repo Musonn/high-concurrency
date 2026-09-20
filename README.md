@@ -1,152 +1,109 @@
-# Load Shedding with a Bounded Queue
+# Experiment C: How Should You Size a Queue?
 
-This lesson moves the experiment from a public API to a deterministic localhost server. The server spends a fixed `20ms` on every request, so the worker pool's approximate processing capacity is known before the test begins.
+Now we can answer a practical production question:
 
-The load generator demonstrates this progression:
+> Why is `queueSize=100`? Why not 10, 40, or 1,000?
 
-```text
-offered load
-     ↓
-bounded queue
-     ↓
-worker capacity reached
-     ↓
-queue fills
-     ↓
-new work is rejected
-```
-
-The goal is to distinguish three related mechanisms:
-
-- A queue absorbs a temporary burst.
-- Backpressure slows or blocks the producer.
-- Load shedding rejects excess work to protect the system.
-
-## Mock Server
-
-The mock server is already implemented in `cmd/mockserver`. Start it in one terminal:
-
-```bash
-go run ./cmd/mockserver
-```
-
-It listens on `127.0.0.1:8080` and exposes:
-
-- `GET /work`: waits `20ms`, then returns `200 OK`.
-- `GET /healthz`: returns `204 No Content` immediately.
-
-You can verify it with:
-
-```bash
-curl -i http://127.0.0.1:8080/healthz
-curl -i http://127.0.0.1:8080/work
-```
-
-The defaults can be changed when needed:
-
-```bash
-go run ./cmd/mockserver -addr=127.0.0.1:8081 -service-time=50ms
-```
-
-Keep the default `20ms` service time for this lesson.
-
-## Theoretical Capacity
-
-Use `10` workers throughout Experiment B. If each worker completes one request every `20ms`, one worker can process approximately:
+The answer should not be:
 
 ```text
-1 second / 20ms = 50 requests/second
+100 seems about right.
 ```
 
-The entire pool can therefore process approximately:
+Instead, work backward from a **latency SLO**.
+
+## Size the Queue From the Latency Budget
+
+Suppose the requirement is:
 
 ```text
-10 workers × 50 requests/second = 500 requests/second
+P95 total latency <= 100ms
 ```
 
-This is an ideal estimate. HTTP and scheduler overhead mean the measured capacity may be slightly below `500 req/s`.
+If measured P95 service time is approximately:
 
-## Experiment B: Load Shedding
+```text
+21ms
+```
 
-Relative to Experiment A, the admission policy changes from a blocking channel send to a non-blocking send. Keep the worker count, queue size, service time, request count, and ticker-based producer fixed.
+then the queue has only the remaining latency budget:
+
+```text
+100ms - 21ms = 79ms
+```
+
+At an estimated processing capacity of `475 req/s`, the number of jobs that may wait is approximately:
+
+```text
+475 req/s * 0.079s = 37.5 jobs
+```
+
+A reasonable queue size to try first is therefore:
+
+```text
+35-40 jobs
+```
+
+not 100.
+
+With a stricter SLO:
+
+```text
+P95 total latency <= 50ms
+```
+
+the queue budget becomes:
+
+```text
+50ms - 21ms = 29ms
+```
+
+and the estimated queue size becomes:
+
+```text
+475 req/s * 0.029s = 13.8 jobs
+```
+
+In that case, the queue can hold only about:
+
+```text
+14 jobs
+```
+
+This gives a useful rule of thumb:
+
+```text
+QueueSize ≈ ServiceRate * QueueLatencyBudget
+```
+
+where:
+
+```text
+QueueLatencyBudget = TotalLatencySLO - ServiceLatency
+```
+
+Use a P95 service-time measurement when sizing a queue for a P95 total-latency SLO. This is a starting estimate, not a guarantee: scheduler overhead, service-time variation, and burstiness still need to be tested.
+
+## Experiment C: Queue Size Trade-offs
+
+Keep the overload scenario fixed:
 
 ```ini
+rate        = 800/s
 workers     = 10
-queueSize   = 100
 serviceTime = 20ms
 requests    = 2000
 ```
 
-The client sends HTTP requests to `http://127.0.0.1:8080/work` with a `2s` timeout. The endpoint and request count are fixed in `main.go`; there are no `-url`, `-duration`, or `-requests` flags.
+Change only the queue size:
 
-## Client Configuration
-
-```bash
-go run . -workers=10 -queuesize=100 -rate=400
+```ini
+queueSize = 0
+queueSize = 10
+queueSize = 25
+queueSize = 40
+queueSize = 100
 ```
-
-| Flag | Default | Meaning |
-|---|---:|---|
-| `-workers` | `10` | Number of request workers |
-| `-queuesize` | `100` | Maximum number of waiting jobs |
-| `-rate` | `400` | Target admission attempts per second |
-
-The client validates its configuration before starting: `-workers` and `-rate` must be greater than zero, and `-queuesize` cannot be negative. The mock server also rejects a negative `-service-time`.
-
-Changing the mock server's address also requires changing the client's hardcoded endpoint.
-
-## Producer and Admission Policy
-
-The producer creates one job per received ticker event, using an interval of `time.Second / rate`, until it has attempted exactly 2,000 jobs. Ticker scheduling can affect the actual arrival rate; the configured rate is a target.
-
-Admission is non-blocking:
-
-```go
-select {
-case jobs <- job:
-    accepted++
-default:
-    rejected++
-}
-```
-
-A successful send accepts the job. If the queue cannot accept it immediately, the producer rejects it and continues. Rejected jobs never reach a worker or make an HTTP request.
-
-Experiment A's blocking `jobs <- job` slows the producer when the queue fills. Experiment B rejects excess work while continuing to attempt admission on ticker events.
-
-## Timing and Shutdown
-
-Each accepted job retains its creation time:
-
-- Queue time runs from job creation until a worker receives it.
-- Total time runs from job creation until the HTTP attempt finishes, including queue time.
-
-After all 2,000 admission attempts, the producer closes `jobs`. Workers drain accepted jobs, then `results` closes after all workers exit. The collector finishes before printing the report.
-
-Admission counters belong to the producer and are returned through a channel. The collector owns the latency samples, avoiding unsynchronized shared counter access.
-
-## Output Metrics
-
-The client prints only these eight metrics:
-
-| Metric | Definition |
-|---|---|
-| Offered rate | Configured `-rate` target in requests/sec; not a measured arrival rate |
-| Actual offered rate | All 2,000 admission attempts divided by the producer's elapsed time |
-| Accepted | Jobs successfully sent to the worker queue |
-| Rejected | Jobs rejected immediately at admission |
-| Reject % | `rejected / 2000 × 100` |
-| Accepted rate | Accepted jobs divided by the producer's elapsed time |
-| Queue P95 | 95th percentile of queue time for accepted jobs |
-| Total P95 | 95th percentile of total time for accepted jobs |
-
-Actual offered rate and accepted rate use the generation window, from before the first ticker wait through the final admission attempt. Rejected requests are excluded from both latency metrics. Every accepted job contributes one latency sample, including if its HTTP attempt fails.
-
-Percentiles use the nearest-rank method; empty samples return zero. Durations are printed with Go duration units, such as `µs` or `ms`.
-
-Admission accounting guarantees `accepted + rejected = 2000`. After drain, every accepted job has one latency sample. The client does not print separate success/failure counts or perform explicit accounting assertions.
-
-## Experiment Matrix
 
 Start the mock server in one terminal:
 
@@ -154,38 +111,42 @@ Start the mock server in one terminal:
 go run ./cmd/mockserver -service-time=20ms
 ```
 
-In another terminal, run these commands sequentially when ready to collect results:
+Then run the client for each queue size:
 
 ```bash
-go run . -workers=10 -queuesize=100 -rate=300
-go run . -workers=10 -queuesize=100 -rate=400
-go run . -workers=10 -queuesize=100 -rate=500
-go run . -workers=10 -queuesize=100 -rate=600
+go run . -workers=10 -queuesize=0 -rate=800
+go run . -workers=10 -queuesize=10 -rate=800
+go run . -workers=10 -queuesize=25 -rate=800
+go run . -workers=10 -queuesize=40 -rate=800
 go run . -workers=10 -queuesize=100 -rate=800
 ```
 
-Each invocation attempts 2,000 jobs and then drains accepted work. Record the eight output metrics in this table:
+Record the results:
 
-| Offered rate (req/s) | Actual offered (req/s) | Accepted | Rejected | Reject % | Accepted rate (req/s) | Queue P95 | Total P95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 300 | | | | | | | |
-| 400 | | | | | | | |
-| 500 | | | | | | | |
-| 600 | | | | | | | |
-| 800 | | | | | | | |
+| Queue size | Accepted | Reject % | Queue P95 | Total P95 |
+|---:|---:|---:|---:|---:|
+| 0 | | | | |
+| 10 | | | | |
+| 25 | | | | |
+| 40 | | | | |
+| 100 | | | | |
 
-## Expected Behavior
+## Expected Trade-off
 
-These are hypotheses to test, not recorded results.
+```text
+smaller queue
+    ↓
+higher rejection rate
+lower latency
 
-| Offered rate (req/s) | Expected behavior |
-|---:|---|
-| 300 | Little queueing and little or no rejection |
-| 400 | Little queueing and little or no rejection |
-| 500 | Near ideal capacity; overhead may cause queue buildup |
-| 600 | Overload; the queue may fill and trigger rejection |
-| 800 | Heavier overload; more rejection while throughput stays near worker capacity |
+larger queue
+    ↓
+lower rejection rate
+higher latency
+```
 
-The 100-job queue can temporarily absorb excess arrivals. With only 2,000 attempts, a run near capacity may finish admission without rejection despite accumulating queue time. Zero rejection does not prove that the offered rate is sustainable indefinitely.
+There is no free configuration that avoids rejection, avoids queueing, and still exceeds system capacity. You must choose the trade-off:
 
-Load shedding does not increase processing capacity or remove waiting time for accepted jobs. It rejects excess work once the bounded queue fills. Compare the completed throughput, rejection percentage, and latency percentiles together.
+> Are you more willing to sacrifice latency, or acceptance rate?
+
+After Experiment C, the next topics are latency SLOs, queue sizing, `429`/`503` responses, and why retries can trigger a retry storm.
