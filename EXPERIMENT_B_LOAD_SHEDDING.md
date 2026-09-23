@@ -46,4 +46,4 @@ Experiment A blocks the producer once the queue is full, while Experiment B cont
 
 ## Conclusion
 
-Latency stops degrading indefinitely and is bounded by the queue capacity. However, this is not free lunch. A larger queue increases latency, while a smaller queue increases rejection rate. 
+Latency stops degrading indefinitely and is bounded by the queue capacity.
