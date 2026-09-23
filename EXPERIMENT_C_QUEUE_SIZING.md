@@ -47,11 +47,13 @@ QueueLatency ≈ QueueSize / ServiceRate
 | 40 | 83.3 ms | 83.7 ms |
 | 100 | 208.3 ms | 208.7 ms |
 
-Queue size is therefore an explicit latency-versus-rejection trade-off. For a
-`100ms` P95 total-latency SLO, sizes `0`, `10`, and `25` met the target in this
-run; size `40` narrowly missed it at about `105ms`, and size `100` missed it
-substantially. Of the configurations tested, `25` was the largest that met the
-SLO while accepting more work than the smaller queues.
+Queue size is therefore an explicit latency-versus-rejection trade-off. A
+service-level objective (SLO) is a measurable performance target, such as
+keeping P95 total latency at or below `100ms`. For that SLO, sizes `0`, `10`,
+and `25` met the target in this run; size `40` narrowly missed it at about
+`105ms`, and size `100` missed it substantially. Of the configurations tested,
+`25` was the largest that met the SLO while accepting more work than the
+smaller queues.
 
 One additional detail: `queueSize=0` accepted fewer jobs than `queueSize=10`.
 A small buffer decouples the producer and workers enough to keep workers busy
