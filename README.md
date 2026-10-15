@@ -58,6 +58,40 @@ The client runs 2,000 requests at each offered rate—`300`, `400`, `500`,
 each rate. Its default 100 workers let the offered load reach the server; use
 `-workers` to override that concurrency.
 
+## D2 — Immediate-Retry Plan
+
+D2 intentionally demonstrates the unsafe retry policy that can create a retry
+storm. It uses the same mock-server and client-load configuration as D1, with
+this policy for each original request:
+
+```text
+max retries  = 3
+on 503       = retry immediately
+Retry-After  = ignored
+backoff      = none
+jitter       = none
+```
+
+`max retries = 3` means an original request makes one initial attempt plus at
+most three retry attempts, for a maximum of four HTTP attempts. A `200` ends
+the request successfully. A fourth `503`, or a non-retryable error, ends it as
+a final failure.
+
+Implementation and measurement plan:
+
+1. Keep the D1 offered rates (`300`, `400`, `500`, `600`, and `800 req/s`),
+   2,000 original requests per rate, 100 client workers, `20ms` server service
+   time, and `max-inflight=10`.
+2. Retry only `503` responses, in the same worker and without sleeping or
+   parsing `Retry-After`.
+3. Keep all attempts for an original request under the same request ID; record
+   its final outcome and latency from its initial creation to its final attempt.
+4. Report original requests, total HTTP attempts, `200` responses, `503`
+   responses, final failures, retries, and P95 final latency.
+5. Compare D2 with D1. The expected failure mode is that immediate retries
+   increase HTTP attempts and `503` responses under overload, while providing
+   little or no improvement in final success and increasing final latency.
+
 That progression leads naturally to building resilient high-concurrency
 services: retry only when it is likely to help, spread retries over time, and
 limit the extra load that retries may create.
