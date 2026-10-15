@@ -13,55 +13,47 @@ import (
 )
 
 type Result struct {
-	QueueTime time.Duration
-	TotalTime time.Duration
+	ID          int
+	StatusCode  int
+	ServiceTime time.Duration
+	Err         error
 }
 
 type Job struct {
+	ID        int
 	CreatedAt time.Time
-}
-
-type AdmissionStats struct {
-	Accepted int
-	Rejected int
-	Duration time.Duration
 }
 
 const requestCount = 2000
 
-func validateConfig(workerCount, queueSize, rate int) error {
-	switch {
-	case workerCount <= 0:
+var offeredRates = []int{300, 400, 500, 600, 800}
+
+func validateConfig(workerCount int) error {
+	if workerCount <= 0 {
 		return errors.New("workers must be greater than zero")
-	case queueSize < 0:
-		return errors.New("queuesize must not be negative")
-	case rate <= 0:
-		return errors.New("rate must be greater than zero")
-	default:
-		return nil
 	}
+	return nil
 }
 
-func fetch(client *http.Client) {
+func fetch(client *http.Client) (int, error) {
 	resp, err := client.Get("http://127.0.0.1:8080/work")
 	if err != nil {
-		return
+		return 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
 
 	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil
 }
 
 func worker(client *http.Client, jobs <-chan Job, results chan<- Result) {
 	for job := range jobs {
-		queueTime := time.Since(job.CreatedAt)
-		fetch(client)
+		statusCode, err := fetch(client)
 		results <- Result{
-			QueueTime: queueTime,
-			TotalTime: time.Since(job.CreatedAt),
+			ID:          job.ID,
+			StatusCode:  statusCode,
+			ServiceTime: time.Since(job.CreatedAt),
+			Err:         err,
 		}
 	}
 }
@@ -78,30 +70,23 @@ func p95(durations []time.Duration) time.Duration {
 	return durations[index]
 }
 
-func main() {
-	workerCount := flag.Int("workers", 10, "number of concurrent workers")
-	queueSize := flag.Int("queuesize", 100, "jobs channel buffer size")
-	rate := flag.Int("rate", 400, "incoming requests per second")
-	flag.Parse()
-	if err := validateConfig(*workerCount, *queueSize, *rate); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
-		os.Exit(2)
-	}
-
-	interval := time.Second / time.Duration(*rate)
+func runExperiment(workerCount, rate int) {
+	interval := time.Second / time.Duration(rate)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	jobs := make(chan Job, *queueSize)
+	// Buffer every original request so local admission control cannot drop work.
+	// This experiment measures the mock server's overload responses instead.
+	jobs := make(chan Job, requestCount)
 	results := make(chan Result)
-	admissionStats := make(chan AdmissionStats, 1)
+	productionDuration := make(chan time.Duration, 1)
 	var wg sync.WaitGroup
 
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 	}
 
-	for i := 0; i < *workerCount; i++ {
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 
 		go func() {
@@ -111,33 +96,19 @@ func main() {
 	}
 
 	go func() {
-		accepted := 0
-		rejected := 0
 		producerStart := time.Now()
 
 		for i := 0; i < requestCount; i++ {
 			<-ticker.C
 			job := Job{
+				ID:        i,
 				CreatedAt: time.Now(),
 			}
-
-			select {
-			case jobs <- job:
-				accepted++
-			default:
-				rejected++
-			}
+			jobs <- job
 		}
-
-		producerDuration := time.Since(producerStart)
 
 		close(jobs)
-
-		admissionStats <- AdmissionStats{
-			Accepted: accepted,
-			Rejected: rejected,
-			Duration: producerDuration,
-		}
+		productionDuration <- time.Since(producerStart)
 	}()
 
 	go func() {
@@ -145,22 +116,47 @@ func main() {
 		close(results)
 	}()
 
-	// Collect latency samples for accepted jobs.
-	var queueTimes []time.Duration
-	var totalTimes []time.Duration
+	// Each job has one attempt in this baseline. Retrying will add additional
+	// results with the same ID in the next experiment.
+	var finalLatencies []time.Duration
+	var totalAttempts, okCount, unavailableCount int
 
 	for result := range results {
-		queueTimes = append(queueTimes, result.QueueTime)
-		totalTimes = append(totalTimes, result.TotalTime)
+		totalAttempts++
+		finalLatencies = append(finalLatencies, result.ServiceTime)
+
+		switch {
+		case result.Err == nil && result.StatusCode == http.StatusOK:
+			okCount++
+		case result.Err == nil && result.StatusCode == http.StatusServiceUnavailable:
+			unavailableCount++
+		}
 	}
 
-	stats := <-admissionStats
-	fmt.Printf("Offered rate: %d requests/sec\n", *rate)
-	fmt.Printf("Actual offered rate: %.2f requests/sec\n", float64(requestCount)/stats.Duration.Seconds())
-	fmt.Printf("Accepted: %d\n", stats.Accepted)
-	fmt.Printf("Rejected: %d\n", stats.Rejected)
-	fmt.Printf("Reject %%: %.2f%%\n", 100*float64(stats.Rejected)/float64(requestCount))
-	fmt.Printf("Accepted rate: %.2f requests/sec\n", float64(stats.Accepted)/stats.Duration.Seconds())
-	fmt.Printf("Queue P95: %v\n", p95(queueTimes))
-	fmt.Printf("Total P95: %v\n", p95(totalTimes))
+	duration := <-productionDuration
+	finalFailures := requestCount - okCount
+	retries := totalAttempts - requestCount
+	fmt.Printf("Offered rate: %d requests/sec\n", rate)
+	fmt.Printf("Actual offered rate: %.2f requests/sec\n", float64(requestCount)/duration.Seconds())
+	fmt.Printf("Original requests: %d\n", requestCount)
+	fmt.Printf("Total HTTP attempts: %d\n", totalAttempts)
+	fmt.Printf("200 responses: %d\n", okCount)
+	fmt.Printf("503 responses: %d\n", unavailableCount)
+	fmt.Printf("Final failures: %d\n", finalFailures)
+	fmt.Printf("Retries: %d\n", retries)
+	fmt.Printf("P95 final latency: %v\n", p95(finalLatencies))
+}
+
+func main() {
+	workerCount := flag.Int("workers", 100, "number of concurrent workers")
+	flag.Parse()
+	if err := validateConfig(*workerCount); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
+		os.Exit(2)
+	}
+
+	for _, rate := range offeredRates {
+		runExperiment(*workerCount, rate)
+		fmt.Println()
+	}
 }

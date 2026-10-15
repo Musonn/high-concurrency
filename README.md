@@ -33,6 +33,31 @@ observe, and control a retry storm. It will introduce:
 - jitter
 - retry budgets
 
+The mock server now supplies the overload signal. Run it with a fixed service
+time and a concurrency cap; once all ten slots are busy, `/work` immediately
+returns `503` and includes `Retry-After: 1`.
+
+```bash
+go run ./cmd/mockserver \
+  -service-time=20ms \
+  -max-inflight=10
+```
+
+Set `-max-inflight=0` to disable overload rejection and retain the earlier,
+unbounded mock-server behavior.
+
+With the server running, run the client in a separate terminal:
+
+```bash
+go run .
+```
+
+The client runs 2,000 requests at each offered rate—`300`, `400`, `500`,
+`600`, and `800 req/s`—and reports original requests, total HTTP attempts,
+`200` and `503` responses, final failures, retries, and P95 final latency for
+each rate. Its default 100 workers let the offered load reach the server; use
+`-workers` to override that concurrency.
+
 That progression leads naturally to building resilient high-concurrency
 services: retry only when it is likely to help, spread retries over time, and
 limit the extra load that retries may create.
