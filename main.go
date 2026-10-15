@@ -25,8 +25,14 @@ type Job struct {
 }
 
 const requestCount = 2000
+const maxRetries = 3
 
 var offeredRates = []int{300, 400, 500, 600, 800}
+
+type attemptResult struct {
+	Result
+	Final bool
+}
 
 func validateConfig(workerCount int) error {
 	if workerCount <= 0 {
@@ -46,14 +52,24 @@ func fetch(client *http.Client) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func worker(client *http.Client, jobs <-chan Job, results chan<- Result) {
+func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult) {
 	for job := range jobs {
-		statusCode, err := fetch(client)
-		results <- Result{
-			ID:          job.ID,
-			StatusCode:  statusCode,
-			ServiceTime: time.Since(job.CreatedAt),
-			Err:         err,
+		for retry := 0; ; retry++ {
+			statusCode, err := fetch(client)
+			shouldRetry := err == nil && statusCode == http.StatusServiceUnavailable && retry < maxRetries
+			results <- attemptResult{
+				Result: Result{
+					ID:          job.ID,
+					StatusCode:  statusCode,
+					ServiceTime: time.Since(job.CreatedAt),
+					Err:         err,
+				},
+				Final: !shouldRetry,
+			}
+
+			if !shouldRetry {
+				break
+			}
 		}
 	}
 }
@@ -78,7 +94,7 @@ func runExperiment(workerCount, rate int) {
 	// Buffer every original request so local admission control cannot drop work.
 	// This experiment measures the mock server's overload responses instead.
 	jobs := make(chan Job, requestCount)
-	results := make(chan Result)
+	results := make(chan attemptResult)
 	productionDuration := make(chan time.Duration, 1)
 	var wg sync.WaitGroup
 
@@ -116,35 +132,45 @@ func runExperiment(workerCount, rate int) {
 		close(results)
 	}()
 
-	// Each job has one attempt in this baseline. Retrying will add additional
-	// results with the same ID in the next experiment.
-	var finalLatencies []time.Duration
-	var totalAttempts, okCount, unavailableCount int
+	var successfulLatencies []time.Duration
+	var totalAttempts, okCount, unavailableCount, finalSuccesses, finalFailures int
 
-	for result := range results {
+	for attempt := range results {
 		totalAttempts++
-		finalLatencies = append(finalLatencies, result.ServiceTime)
 
 		switch {
-		case result.Err == nil && result.StatusCode == http.StatusOK:
+		case attempt.Err == nil && attempt.StatusCode == http.StatusOK:
 			okCount++
-		case result.Err == nil && result.StatusCode == http.StatusServiceUnavailable:
+		case attempt.Err == nil && attempt.StatusCode == http.StatusServiceUnavailable:
 			unavailableCount++
+		}
+
+		if !attempt.Final {
+			continue
+		}
+
+		if attempt.Err == nil && attempt.StatusCode == http.StatusOK {
+			finalSuccesses++
+			successfulLatencies = append(successfulLatencies, attempt.ServiceTime)
+		} else {
+			finalFailures++
 		}
 	}
 
 	duration := <-productionDuration
-	finalFailures := requestCount - okCount
 	retries := totalAttempts - requestCount
 	fmt.Printf("Offered rate: %d requests/sec\n", rate)
 	fmt.Printf("Actual offered rate: %.2f requests/sec\n", float64(requestCount)/duration.Seconds())
 	fmt.Printf("Original requests: %d\n", requestCount)
-	fmt.Printf("Total HTTP attempts: %d\n", totalAttempts)
+	fmt.Printf("HTTP attempts: %d\n", totalAttempts)
+	fmt.Printf("Retries: %d\n", retries)
+	fmt.Printf("Amplification: %.2fx\n", float64(totalAttempts)/float64(requestCount))
 	fmt.Printf("200 responses: %d\n", okCount)
 	fmt.Printf("503 responses: %d\n", unavailableCount)
-	fmt.Printf("Final failures: %d\n", finalFailures)
-	fmt.Printf("Retries: %d\n", retries)
-	fmt.Printf("P95 final latency: %v\n", p95(finalLatencies))
+	fmt.Printf("Final success: %d\n", finalSuccesses)
+	fmt.Printf("Final failure: %d\n", finalFailures)
+	fmt.Printf("Success %%: %.2f%%\n", 100*float64(finalSuccesses)/float64(requestCount))
+	fmt.Printf("Success P95: %v\n", p95(successfulLatencies))
 }
 
 func main() {
