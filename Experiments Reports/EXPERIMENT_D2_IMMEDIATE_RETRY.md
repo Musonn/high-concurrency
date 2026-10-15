@@ -28,11 +28,11 @@ attempts. A `200`, a non-`503` error, or a fourth `503` is the final outcome.
 
 ## Results
 
-| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | 200 | 503 | Final failure | Failure % | Success P95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 500 | 2000 | 2887 | 887 | 1.44× | 1863 | 1024 | 137 | 6.85% | 21.470134 ms |
-| 600 | 2000 | 4098 | 2098 | 2.05× | 1604 | 2494 | 396 | 19.80% | 21.414828 ms |
-| 800 | 2000 | 5099 | 3099 | 2.55× | 1216 | 3883 | 784 | 39.20% | 22.165998 ms |
+| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | Efficiency | Retries / success | 200 | 503 | Final failure | Failure % | Success P95 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 500 | 2000 | 2887 | 887 | 1.44× | 64.53% | 0.48 | 1863 | 1024 | 137 | 6.85% | 21.470134 ms |
+| 600 | 2000 | 4098 | 2098 | 2.05× | 39.14% | 1.31 | 1604 | 2494 | 396 | 19.80% | 21.414828 ms |
+| 800 | 2000 | 5099 | 3099 | 2.55× | 23.85% | 2.55 | 1216 | 3883 | 784 | 39.20% | 22.165998 ms |
 
 The corresponding actual offered rates were `499.64`, `599.67`, and `793.27
 req/s`.

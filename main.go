@@ -159,12 +159,19 @@ func runExperiment(workerCount, rate int) {
 
 	duration := <-productionDuration
 	retries := totalAttempts - requestCount
+	efficiency := 100 * float64(finalSuccesses) / float64(totalAttempts)
 	fmt.Printf("Offered rate: %d requests/sec\n", rate)
 	fmt.Printf("Actual offered rate: %.2f requests/sec\n", float64(requestCount)/duration.Seconds())
 	fmt.Printf("Original requests: %d\n", requestCount)
 	fmt.Printf("HTTP attempts: %d\n", totalAttempts)
 	fmt.Printf("Retries: %d\n", retries)
 	fmt.Printf("Amplification: %.2fx\n", float64(totalAttempts)/float64(requestCount))
+	fmt.Printf("Efficiency: %.2f%%\n", efficiency)
+	if finalSuccesses == 0 {
+		fmt.Println("Retries per successful request: n/a")
+	} else {
+		fmt.Printf("Retries per successful request: %.2f\n", float64(retries)/float64(finalSuccesses))
+	}
 	fmt.Printf("200 responses: %d\n", okCount)
 	fmt.Printf("503 responses: %d\n", unavailableCount)
 	fmt.Printf("Final success: %d\n", finalSuccesses)

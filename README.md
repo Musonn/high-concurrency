@@ -87,10 +87,56 @@ Implementation and measurement plan:
    attempt.
 4. Use this results table. `200` and `503` are response counts across all HTTP
    attempts; final success and final failure are counts of original requests.
+   `Efficiency = final success / HTTP attempts`; `Retries / success = retries /
+   final success`.
 
-| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | 200 | 503 | Final failure | Failure % | Success P95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | Efficiency | Retries / success | 200 | 503 | Final failure | Failure % | Success P95 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 
 5. Compare D2 with D1. The expected failure mode is that immediate retries
    increase HTTP attempts and `503` responses under overload, while providing
    little or no improvement in final success and increasing final latency.
+
+## D3 — Exponential Backoff with Jitter Plan
+
+D3 keeps D2's workload and server configuration, but replaces immediate retry
+with capped exponential backoff and full jitter:
+
+```text
+workers      = 100
+originals    = 2000 per offered rate
+max-inflight = 10
+service      = 20ms
+max-retries  = 3
+base         = 40ms
+cap          = 200ms
+Retry-After  = omitted
+```
+
+For retry number `n`, starting at 1, sample the delay independently as:
+
+```text
+delay_n ~ Uniform(0, min(cap, base × 2^(n - 1)))
+```
+
+With the D3 constants, the three possible retry delays are sampled from
+`[0, 40ms)`, `[0, 80ms)`, and `[0, 160ms)`. The `200ms` cap does not bind with
+three retries though.
+
+The client retries only `503` responses. It does not parse or wait for the
+server's `Retry-After: 1`; the jittered backoff above is the sole retry delay.
+As in D2, a `200`, a non-`503` error, or exhaustion of the third retry is the
+final outcome.
+
+Run D3 at `500`, `600`, and `800 req/s` and record the same table used by D2:
+
+`Efficiency = final success / HTTP attempts`; `Retries / success = retries /
+final success`.
+
+| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | Efficiency | Retries / success | 200 | 503 | Final failure | Failure % | Success P95 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+
+Compare D3 to D2 to test whether spreading retries reduces 503 amplification
+while preserving or improving final success. D3's added delay may raise Success
+P95; that latency cost should be evaluated alongside the reduction in excess
+HTTP work.
