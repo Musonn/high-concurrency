@@ -27,7 +27,7 @@ type Job struct {
 const requestCount = 2000
 const maxRetries = 3
 
-var offeredRates = []int{300, 400, 500, 600, 800}
+var offeredRates = []int{500, 600, 800}
 
 type attemptResult struct {
 	Result
@@ -169,7 +169,7 @@ func runExperiment(workerCount, rate int) {
 	fmt.Printf("503 responses: %d\n", unavailableCount)
 	fmt.Printf("Final success: %d\n", finalSuccesses)
 	fmt.Printf("Final failure: %d\n", finalFailures)
-	fmt.Printf("Success %%: %.2f%%\n", 100*float64(finalSuccesses)/float64(requestCount))
+	fmt.Printf("Failure %%: %.2f%%\n", 100*float64(finalFailures)/float64(requestCount))
 	fmt.Printf("Success P95: %v\n", p95(successfulLatencies))
 }
 

@@ -52,9 +52,9 @@ With the server running, run the client in a separate terminal:
 go run .
 ```
 
-The client runs 2,000 requests at each offered rate—`300`, `400`, `500`,
-`600`, and `800 req/s`. Its default 100 workers let the offered load reach the
-server; use `-workers` to override that concurrency.
+The client runs 2,000 requests at each offered rate—`500`, `600`, and
+`800 req/s`. Its default 100 workers let the offered load reach the server;
+use `-workers` to override that concurrency.
 
 ## D2 — Immediate-Retry Plan
 
@@ -77,7 +77,7 @@ a final failure.
 
 Implementation and measurement plan:
 
-1. Keep the D1 configuration: offered rates `300`, `400`, `500`, `600`, and
+1. Keep the offered rates `500`, `600`, and
    `800 req/s`; 2,000 original requests per rate; 100 client workers; `20ms`
    server service time; and `max-inflight=10`.
 2. Retry only `503` responses, in the same worker and without sleeping or
@@ -88,8 +88,8 @@ Implementation and measurement plan:
 4. Use this results table. `200` and `503` are response counts across all HTTP
    attempts; final success and final failure are counts of original requests.
 
-| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | 200 | 503 | Final success | Final failure | Success % | Success P95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | 200 | 503 | Final failure | Failure % | Success P95 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 
 5. Compare D2 with D1. The expected failure mode is that immediate retries
    increase HTTP attempts and `503` responses under overload, while providing
