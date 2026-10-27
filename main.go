@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"sort"
@@ -26,6 +27,8 @@ type Job struct {
 
 const requestCount = 2000
 const maxRetries = 3
+const baseBackoff = 40 * time.Millisecond
+const maxBackoff = 200 * time.Millisecond
 
 var offeredRates = []int{500, 600, 800}
 
@@ -52,7 +55,16 @@ func fetch(client *http.Client) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult) {
+func retryDelay(retryNumber int, random *rand.Rand) time.Duration {
+	limit := baseBackoff << (retryNumber - 1)
+	if limit > maxBackoff {
+		limit = maxBackoff
+	}
+
+	return time.Duration(random.Int63n(int64(limit)))
+}
+
+func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult, random *rand.Rand) {
 	for job := range jobs {
 		for retry := 0; ; retry++ {
 			statusCode, err := fetch(client)
@@ -70,6 +82,8 @@ func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult) 
 			if !shouldRetry {
 				break
 			}
+
+			time.Sleep(retryDelay(retry+1, random))
 		}
 	}
 }
@@ -105,10 +119,11 @@ func runExperiment(workerCount, rate int) {
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
-			worker(client, jobs, results)
-		}()
+			random := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			worker(client, jobs, results, random)
+		}(i)
 	}
 
 	go func() {
