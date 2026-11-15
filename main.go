@@ -34,7 +34,42 @@ var offeredRates = []int{500, 600, 800}
 
 type attemptResult struct {
 	Result
-	Final bool
+	Final        bool
+	BudgetDenied bool
+}
+
+// retryBudget is a token bucket shared by every worker in one offered-rate
+// run. A token is consumed before a retry begins its backoff delay.
+type retryBudget struct {
+	mu        sync.Mutex
+	rate      float64
+	capacity  float64
+	tokens    float64
+	updatedAt time.Time
+}
+
+func newRetryBudget(tokensPerSecond float64) *retryBudget {
+	now := time.Now()
+	return &retryBudget{
+		rate:      tokensPerSecond,
+		capacity:  tokensPerSecond,
+		tokens:    tokensPerSecond,
+		updatedAt: now,
+	}
+}
+
+func (b *retryBudget) take() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	b.tokens = min(b.capacity, b.tokens+now.Sub(b.updatedAt).Seconds()*b.rate)
+	b.updatedAt = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 func validateConfig(workerCount int) error {
@@ -64,11 +99,12 @@ func retryDelay(retryNumber int, random *rand.Rand) time.Duration {
 	return time.Duration(random.Int63n(int64(limit)))
 }
 
-func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult, random *rand.Rand) {
+func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult, random *rand.Rand, budget *retryBudget) {
 	for job := range jobs {
 		for retry := 0; ; retry++ {
 			statusCode, err := fetch(client)
-			shouldRetry := err == nil && statusCode == http.StatusServiceUnavailable && retry < maxRetries
+			eligibleForRetry := err == nil && statusCode == http.StatusServiceUnavailable && retry < maxRetries
+			shouldRetry := eligibleForRetry && budget.take()
 			results <- attemptResult{
 				Result: Result{
 					ID:          job.ID,
@@ -76,7 +112,8 @@ func worker(client *http.Client, jobs <-chan Job, results chan<- attemptResult, 
 					ServiceTime: time.Since(job.CreatedAt),
 					Err:         err,
 				},
-				Final: !shouldRetry,
+				Final:        !shouldRetry,
+				BudgetDenied: eligibleForRetry && !shouldRetry,
 			}
 
 			if !shouldRetry {
@@ -115,6 +152,7 @@ func runExperiment(workerCount, rate int) {
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 	}
+	budget := newRetryBudget(float64(rate) * 0.10)
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -122,7 +160,7 @@ func runExperiment(workerCount, rate int) {
 		go func(workerID int) {
 			defer wg.Done()
 			random := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
-			worker(client, jobs, results, random)
+			worker(client, jobs, results, random, budget)
 		}(i)
 	}
 
@@ -148,7 +186,7 @@ func runExperiment(workerCount, rate int) {
 	}()
 
 	var successfulLatencies []time.Duration
-	var totalAttempts, okCount, unavailableCount, finalSuccesses, finalFailures int
+	var totalAttempts, okCount, unavailableCount, finalSuccesses, finalFailures, budgetDenials int
 
 	for attempt := range results {
 		totalAttempts++
@@ -162,6 +200,9 @@ func runExperiment(workerCount, rate int) {
 
 		if !attempt.Final {
 			continue
+		}
+		if attempt.BudgetDenied {
+			budgetDenials++
 		}
 
 		if attempt.Err == nil && attempt.StatusCode == http.StatusOK {
@@ -180,6 +221,7 @@ func runExperiment(workerCount, rate int) {
 	fmt.Printf("Original requests: %d\n", requestCount)
 	fmt.Printf("HTTP attempts: %d\n", totalAttempts)
 	fmt.Printf("Retries: %d\n", retries)
+	fmt.Printf("Retry budget denials: %d\n", budgetDenials)
 	fmt.Printf("Amplification: %.2fx\n", float64(totalAttempts)/float64(requestCount))
 	fmt.Printf("Efficiency: %.2f%%\n", efficiency)
 	if finalSuccesses == 0 {
