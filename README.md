@@ -1,114 +1,81 @@
-# Next Lesson — D4: Retry Budget
+# Experiment E — Client Deadline and Server Cancellation
 
-D3 showed that exponential backoff with full jitter can improve final success,
-but unlimited retries can still create substantial HTTP amplification. D4 adds
-a retry budget: retries are permitted only while a rate-limited allowance is
-available.
+Experiment E shows what happens when a client gives up on a request before the
+server has finished doing its work. It compares a server that ignores client
+cancellation with one that honors it.
 
-## Goal
+## Fixed configuration
 
-Test whether a bounded retry rate retains the resilience benefit of D3 while
-reducing unnecessary work during overload.
+```ini
+service-time = 100ms
+max-inflight = 10
+client-deadline = 30ms
+```
 
-## Fixed workload and server configuration
+The server's theoretical capacity is:
 
 ```text
-offered rates = 500, 600, 800 req/s
-workers       = 100
-originals     = 2000 per offered rate
-service-time  = 20ms
-max-inflight  = 10
-max retries   = 3
+10 / 0.1s = 100 req/s
 ```
 
-Run the local mock server with a fixed service time and a concurrency cap:
+Every client request has a 30ms deadline. Since the server needs 100ms to
+complete normal work, an admitted request will outlive the client deadline
+unless the server stops when the request context is cancelled.
 
-```bash
-go run ./cmd/mockserver \
-  -service-time=20ms \
-  -max-inflight=10
+## E1 — Server ignores cancellation
+
+Keep the server's work implementation as:
+
+```go
+time.Sleep(serviceTime)
 ```
 
-When all ten service slots are busy, `/work` immediately returns `503 Service
-Unavailable` and includes `Retry-After: 1`.
+The client times out after 30ms, but the server continues working for the full
+100ms. Its in-flight slot remains occupied until that work completes.
 
-## D4 retry policy
-
-D4 retains D3's retry-delay policy:
+Record:
 
 ```text
-base backoff = 40ms
-backoff cap  = 200ms
-jitter       = full jitter
-Retry-After  = ignored
+client deadline exceeded
+server completed work
+server canceled work
 ```
 
-For retry number `n`, starting at 1, independently sample:
+Expected result: client deadline failures increase while the server still
+reports completed work; canceled work should remain zero. This is wasted work
+because the client no longer needs the response.
+
+## E2 — Server honors cancellation
+
+Replace unconditional sleeping with context-aware work:
+
+```go
+select {
+case <-time.After(serviceTime):
+	// normal completion
+
+case <-r.Context().Done():
+	// client no longer needs the work
+	return
+}
+```
+
+The sequence is now:
 
 ```text
-delay_n ~ Uniform(0, min(200ms, 40ms × 2^(n - 1)))
+client timeout at 30ms
+        ↓
+request context canceled
+        ↓
+server stops work
+        ↓
+slot released
 ```
 
-Therefore the three possible retry delays are sampled from `[0, 40ms)`,
-`[0, 80ms)`, and `[0, 160ms)`.
+Record the same counters as E1
 
-Add a retry budget of 10% of the offered original-request rate:
+## Comparison
 
-| Offered original rate | Retry allowance |
-|---:|---:|
-| 500 req/s | 50 retries/s |
-| 600 req/s | 60 retries/s |
-| 800 req/s | 80 retries/s |
-
-Implement the allowance as a token bucket, shared by all workers for one
-offered-rate run. The bucket should replenish at the retry-allowance rate and
-hold at most one second of allowance. A retry consumes one token before its
-backoff delay begins.
-
-```text
-503 received
-│
-├─ retry token available → consume token → backoff + full jitter → retry
-│
-└─ no retry token        → final failure
-```
-
-A `200`, a non-`503` error, exhaustion of three retries, or no available retry
-token is a final outcome. D4 must not parse or wait for `Retry-After`.
-
-## Measurements
-
-Run D4 once at each offered rate: 500, 600, and 800 req/s. Record the standard
-table used in D2 and D3, plus retry-budget denials if the implementation adds
-that counter.
-
-| Offered (req/s) | Original | HTTP attempts | Retries | Amplification | Efficiency | Retries / success | 200 | 503 | Final failure | Failure % | Success P95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-
-Definitions:
-
-```text
-HTTP amplification = HTTP attempts / original requests
-Efficiency         = final success / HTTP attempts
-```
-
-## Cross-policy comparison
-
-At 800 req/s, compare the four policies:
-
-| Policy | Failure % | HTTP amplification | Success P95 | Efficiency |
-|---|---:|---:|---:|---:|
-| D1 No retry |  |  |  |  |
-| D2 Immediate retry |  |  |  |  |
-| D3 Unlimited backoff + jitter |  |  |  |  |
-| D4 Budgeted backoff + jitter |  |  |  |  |
-
-The primary decision metrics are:
-
-1. Failure percentage
-2. HTTP amplification
-3. Success P95
-4. Efficiency
-
-The desired D4 outcome is lower amplification and higher efficiency than D3,
-without surrendering all of D3's final-success improvement over D1 and D2.
+Compare E1 and E2 using the three counters and, if useful, the observed
+in-flight occupancy. E2 should show canceled server work and earlier slot
+release, making cancellation's capacity benefit directly visible.
